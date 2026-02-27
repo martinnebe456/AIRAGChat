@@ -158,7 +158,6 @@ Volitelné přepínače:
 - `docs/secrets-management.md`
 - `docs/telemetry-observability.md`
 - `docs/evaluation-framework.md`
-- `docs/business-case-cs.md` (česky)
 
 ## Poznámky
 
