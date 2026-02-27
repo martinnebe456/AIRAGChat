@@ -1,0 +1,283 @@
+name: airagchat
+
+services:
+  frontend:
+    build:
+      context: ../../apps/frontend
+      dockerfile: Dockerfile
+      target: dev
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000/api/v1}
+      VITE_OTEL_ENABLED: ${VITE_OTEL_ENABLED:-true}
+      VITE_OTEL_OTLP_HTTP_URL: ${VITE_OTEL_OTLP_HTTP_URL:-http://localhost:4318/v1/traces}
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    volumes:
+      - ../../apps/frontend:/app
+      - /app/node_modules
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5173"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ../../apps/backend
+      dockerfile: Dockerfile
+      target: dev
+    env_file:
+      - ../../.env
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      APP_DEBUG: ${APP_DEBUG:-true}
+      APP_CORS_ORIGINS: ${APP_CORS_ORIGINS:-http://localhost:5173}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-airagchat}:${POSTGRES_PASSWORD:-airagchat}@postgres:5432/${POSTGRES_DB:-airagchat}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      UPLOADS_DIR: ${UPLOADS_DIR:-/app/data/uploads}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME_BACKEND:-airagchat-backend}
+      PYTHONPATH: /app
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - ../../apps/backend:/app
+      - ../../data/uploads:/app/data/uploads
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
+  worker:
+    build:
+      context: ../../apps/backend
+      dockerfile: Dockerfile
+      target: dev
+    env_file:
+      - ../../.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-airagchat}:${POSTGRES_PASSWORD:-airagchat}@postgres:5432/${POSTGRES_DB:-airagchat}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME_WORKER:-airagchat-worker}
+      PYTHONPATH: /app
+    volumes:
+      - ../../apps/backend:/app
+      - ../../data/uploads:/app/data/uploads
+    command: >
+      sh -c "celery -A app.workers.celery_app.celery_app worker -Q ingestion,evals,default -l info"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      backend:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A app.workers.celery_app.celery_app inspect ping >/dev/null 2>&1",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  scheduler:
+    build:
+      context: ../../apps/backend
+      dockerfile: Dockerfile
+      target: dev
+    env_file:
+      - ../../.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-airagchat}:${POSTGRES_PASSWORD:-airagchat}@postgres:5432/${POSTGRES_DB:-airagchat}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      PYTHONPATH: /app
+    volumes:
+      - ../../apps/backend:/app
+      - ../../data/uploads:/app/data/uploads
+    command: >
+      sh -c "celery -A app.workers.celery_app.celery_app beat -l info"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_started
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-airagchat}
+      POSTGRES_USER: ${POSTGRES_USER:-airagchat}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airagchat}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-airagchat} -d ${POSTGRES_DB:-airagchat}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.4
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      # The official image may not include wget/curl; use the bundled binary for a lightweight liveness check.
+      test: ["CMD", "/qdrant/qdrant", "--version"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.100.0
+    profiles: ["observability"]
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ../../infra/otel/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8889:8889"
+    depends_on:
+      jaeger:
+        condition: service_started
+      prometheus:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:13133"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  prometheus:
+    image: prom/prometheus:v2.53.1
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-lifecycle
+    volumes:
+      - ../../infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ../../infra/grafana/provisioning:/etc/grafana/provisioning
+      - ../../infra/grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      prometheus:
+        condition: service_started
+      jaeger:
+        condition: service_started
+      loki:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.58
+    profiles: ["observability"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+      - "4319:4317"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:16686"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  loki:
+    image: grafana/loki:3.1.1
+    profiles: ["observability"]
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ../../infra/loki/local-config.yaml:/etc/loki/local-config.yaml:ro
+    ports:
+      - "3100:3100"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3100/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  promtail:
+    image: grafana/promtail:3.1.1
+    profiles: ["observability-logs"]
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ../../infra/promtail/promtail-config.yaml:/etc/promtail/config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      loki:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  redis_data:
+  grafana_data:

@@ -1,0 +1,19 @@
+[
+  {
+    "case_key": "sample-1",
+    "question": "What runtime integration layer is required?",
+    "expected_answer": "Llama Stack",
+    "expected_sources": [],
+    "expects_refusal": false,
+    "tags": ["runtime"]
+  },
+  {
+    "case_key": "sample-2",
+    "question": "What should the assistant do when no relevant context is found in strict mode?",
+    "expected_answer": "Refuse and say context is insufficient",
+    "expected_sources": [],
+    "expects_refusal": true,
+    "tags": ["guardrails"]
+  }
+]
+
