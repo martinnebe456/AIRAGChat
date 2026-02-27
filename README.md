@@ -158,7 +158,6 @@ Optional flags:
 - `docs/secrets-management.md`
 - `docs/telemetry-observability.md`
 - `docs/evaluation-framework.md`
-- `docs/business-case-cs.md` (Czech)
 
 ## Notes
 
